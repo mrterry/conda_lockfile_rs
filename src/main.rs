@@ -3,11 +3,11 @@ extern crate yaml_rust;
 extern crate sha1;
 
 use std::env;
-use std::path::PathBuf;
-use std::fs::File;
 use std::error::Error;
+use std::fs::File;
 use std::io::prelude::*;
-use std::io::BufReader;
+use std::path::PathBuf;
+use std::io::{Error as ioError, ErrorKind as ioErrorKind};
 
 use clap::{App, Arg, SubCommand, ArgMatches};
 use yaml_rust::{YamlLoader};
@@ -77,7 +77,7 @@ fn handle_create(matches: &ArgMatches) -> Result<(), Box<Error>> {
 
 fn get_hash(line: &str) -> Option<&str> {
     if line.starts_with(SIGIL) {
-        Some(&line[10..])
+        Some(&line[SIGIL.len()..])
     } else {
         None
     }
@@ -86,10 +86,10 @@ fn get_hash(line: &str) -> Option<&str> {
 
 fn handle_checkenv(matches: &ArgMatches) -> Result<(), Box<Error>> {
     // Get the data from the depfile.
-    let depfile_path = matches.value_of("depfile").expect("bah!");
-    let mut depfile = File::open(depfile_path).expect("fille not found");
+    let depfile_path = matches.value_of("depfile").unwrap();
+    let mut depfile = File::open(depfile_path)?;
     let mut depfile_data = String::new();
-    depfile.read_to_string(&mut depfile_data).expect("Could not read file");
+    depfile.read_to_string(&mut depfile_data)?;
 
     // Hash the contents of the file
     let mut m = sha1::Sha1::new();
@@ -111,19 +111,24 @@ fn handle_checkenv(matches: &ArgMatches) -> Result<(), Box<Error>> {
     ].iter().collect();
     println!("lockfile_path: {}", lockfile_path.to_str().unwrap());
 
-    let mut lockfile = File::open(lockfile_path).expect("file not found");
+    let mut lockfile = File::open(lockfile_path)?;
     let mut lockfile_data = String::new();
-    lockfile.read_to_string(&mut lockfile_data).expect("Unable to read lockfile");
-    let mut hashes = lockfile_data.lines()
+    lockfile.read_to_string(&mut lockfile_data)?;
+    let found_hash = lockfile_data
+        .lines()
         .filter_map(|line: &str| get_hash(&line))
-        .map(|line| line.trim());
-    let found_hash = hashes.next().unwrap();
+        .map(|line| line.trim())
+        .nth(0)
+        .unwrap();
 
-    println!("{}", expected_hash);
-    println!("{}", found_hash);
-    println!("{}", expected_hash == found_hash);
-
-    Ok(())
+    if found_hash == expected_hash {
+        Ok(())
+    } else {
+        println!("{}", expected_hash);
+        println!("{}", found_hash);
+        println!("{}", expected_hash == found_hash);
+        Err(ioError::new(ioErrorKind::Other, "Hashes do not match").into())
+    }
 }
 
 
