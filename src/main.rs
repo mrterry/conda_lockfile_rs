@@ -12,7 +12,7 @@ use std::io::{Error as ioError, ErrorKind as ioErrorKind};
 
 use clap::{App, Arg, SubCommand, ArgMatches};
 use glob::glob;
-use yaml_rust::{YamlLoader};
+use yaml_rust::{YamlLoader, Yaml};
 
 const SIGIL: &str = "# ENVHASH:";
 
@@ -108,6 +108,15 @@ fn compute_file_hash<R: Read>(mut f: R) -> Result<String> {
 }
 
 
+fn read_conda_yaml_data<R: Read>(mut f: R) -> Result<Yaml> {
+    let mut depfile_data = String::new();
+    f.read_to_string(&mut depfile_data)?;
+    let mut docs = YamlLoader::load_from_str(&depfile_data).unwrap();
+    let doc = docs.remove(0);  // YamlLoader loads multiple documents.  We only want the first.
+    Ok(doc)
+}
+
+
 fn handle_checkenv(matches: &ArgMatches) -> Result<()> {
     // Get the data from the depfile.
     let depfile_path = matches.value_of("depfile").unwrap();
@@ -115,11 +124,8 @@ fn handle_checkenv(matches: &ArgMatches) -> Result<()> {
     let expected_hash = compute_file_hash(depfile)?;
 
     // Extract the name of the environment
-    let mut depfile2 = File::open(depfile_path)?;
-    let mut depfile_data = String::new();
-    depfile2.read_to_string(&mut depfile_data)?;
-    let docs = YamlLoader::load_from_str(&depfile_data).unwrap();
-    let doc = &docs[0];  // YamlLoader loads multiple documents
+    let depfile2 = File::open(depfile_path)?;
+    let doc = read_conda_yaml_data(depfile2)?;
     let env_name = doc["name"].as_str().unwrap();
     println!("env name: {}", env_name);
 
