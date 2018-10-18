@@ -3,7 +3,6 @@ extern crate glob;
 extern crate sha1;
 extern crate yaml_rust;
 
-use std::str;
 use std::env;
 use std::error::Error;
 use std::fs::{copy, File};
@@ -11,10 +10,11 @@ use std::io::prelude::*;
 use std::io::{Error as ioError, ErrorKind as ioErrorKind};
 use std::path::PathBuf;
 use std::process::Command;
+use std::str;
 
 use clap::{App, Arg, ArgMatches, SubCommand};
 use glob::glob;
-use yaml_rust::{Yaml, YamlLoader, YamlEmitter};
+use yaml_rust::{Yaml, YamlEmitter, YamlLoader};
 
 const SIGIL: &str = "# ENVHASH:";
 
@@ -81,7 +81,7 @@ fn handle_freeze(matches: &ArgMatches) -> Result<()> {
         ("Darwin", "Linux") => {
             let lockfile_path = "TODO".to_string();
             freeze_linux_on_mac(&depfile_path, &lockfile_path)
-        },
+        }
         _ => {
             let msg = format!(
                 "Unable to target {} from {}",
@@ -105,8 +105,15 @@ fn freeze_same_platform(depfile_path: &str, lockfile_path: &str) -> Result<()> {
     // Create the environment, but use a name that is unlikely to clobber anything pre-existing.
     let tmp_name = "___conda_lockfile_temp".to_string();
     Command::new(&conda_path)
-        .args(&["env", "crate", "-f", &depfile_path, "-n", &tmp_name, "--force"])
-        .output()?;
+        .args(&[
+            "env",
+            "crate",
+            "-f",
+            &depfile_path,
+            "-n",
+            &tmp_name,
+            "--force",
+        ]).output()?;
 
     // Read the env create by `conda create`.
     let output = Command::new(&conda_path)
