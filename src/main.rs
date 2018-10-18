@@ -5,10 +5,11 @@ extern crate yaml_rust;
 
 use std::env;
 use std::error::Error;
-use std::fs::File;
+use std::fs::{File, copy};
 use std::io::prelude::*;
-use std::path::PathBuf;
 use std::io::{Error as ioError, ErrorKind as ioErrorKind};
+use std::path::PathBuf;
+use std::process::Command;
 
 use clap::{App, Arg, SubCommand, ArgMatches};
 use glob::glob;
@@ -71,13 +72,85 @@ fn main() -> Result<()> {
 
 
 fn handle_freeze(matches: &ArgMatches) -> Result<()> {
-    println!("{:?}", matches);
     Ok(())
 }
 
 
+
+
+fn extract_lockfile(matches: &ArgMatches) -> String {
+    match matches.value_of("lockfile") {
+        Some(path) => path.to_string(),
+        None => default_lockfile(),
+    }
+}
+
+
+fn default_lockfile() -> String {
+    match get_platform() {
+        Ok(platform) => format!("deps.yml.{}.lock", platform),
+        Err(_) => "".to_string()
+    }
+}
+
+
+fn conda_prefix(name: &str) -> Result<PathBuf> {
+    let root = env::var("CONDA_ROOT")?;
+    let path: PathBuf = [
+        &root,
+        "envs",
+        name,
+    ].iter().collect();
+    Ok(path)
+}
+
+
+fn get_platform() -> Result<String> {
+    if cfg!(target_os = "linux") {
+        Ok("Linux".to_string())
+    } else if cfg!(target_os = "macos") {
+        Ok("Darwin".to_string())
+    } else {
+        Err(ioError::new(ioErrorKind::Other, "Unknown platform").into())
+    }
+}
+
+
+fn find_conda() -> Result<String> {
+    match env::var("CONDA_EXE") {
+        Ok(conda) => Ok(conda),
+        Err(_) => match env::var("_CONDA_EXE") {
+            Ok(conda) => Ok(conda),
+            Err(_) => Err(ioError::new(ioErrorKind::Other, "Unable to find conda").into())
+        },
+    }
+}
+
+
 fn handle_create(matches: &ArgMatches) -> Result<()> {
-    println!("{:?}", matches);
+    if cfg!(target_os = "windows") {
+        return Err(ioError::new(ioErrorKind::Other, "Unsupported os").into());
+    }
+
+    let lockfile_path = extract_lockfile(&matches);
+    let lockfile = File::open(&lockfile_path)?;
+    let doc = read_conda_yaml_data(lockfile)?;
+    let env_name = doc["name"].as_str().unwrap();
+
+    let conda_path = find_conda()?;
+    println!("conda_path {}", conda_path);
+    let output = Command::new(conda_path)
+        .args(&[
+              "env", "create", "--force", "-q", "--json",
+              "--name", &env_name,
+              "-f", &lockfile_path])
+        .output()?;
+    println!("{:?}", output);
+
+    // Copy lockfile to constructed env
+    let mut embeded_lockfile = conda_prefix(&env_name)?;
+    embeded_lockfile.push("deps.yml.lock");
+    copy(lockfile_path, embeded_lockfile)?;
     Ok(())
 }
 
