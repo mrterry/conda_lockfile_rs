@@ -3,6 +3,7 @@ extern crate glob;
 extern crate sha1;
 extern crate yaml_rust;
 
+use std::str;
 use std::env;
 use std::error::Error;
 use std::fs::{copy, File};
@@ -13,7 +14,7 @@ use std::process::Command;
 
 use clap::{App, Arg, ArgMatches, SubCommand};
 use glob::glob;
-use yaml_rust::{Yaml, YamlLoader};
+use yaml_rust::{Yaml, YamlLoader, YamlEmitter};
 
 const SIGIL: &str = "# ENVHASH:";
 
@@ -62,13 +63,90 @@ fn main() -> Result<()> {
 }
 
 fn handle_freeze(matches: &ArgMatches) -> Result<()> {
+    let depfile_path = matches.value_of("depfile").unwrap();
+
+    let execution_platform = get_platform()?;
+    let target_platform = match matches.value_of("platform") {
+        Some(platform) => platform,
+        None => &execution_platform,
+    };
+
+    // TODO: this might not be the correct path when cross-building.
+    if execution_platform == target_platform {
+        let lockfile_path = extract_lockfile_path(&matches);
+        return freeze_same_platform(&depfile_path, &lockfile_path);
+    }
+
+    match (execution_platform.as_str(), target_platform) {
+        ("Darwin", "Linux") => {
+            let lockfile_path = "TODO".to_string();
+            freeze_linux_on_mac(&depfile_path, &lockfile_path)
+        },
+        _ => {
+            let msg = format!(
+                "Unable to target {} from {}",
+                target_platform, execution_platform
+            );
+            Err(ioError::new(ioErrorKind::Other, msg).into())
+        }
+    }
+}
+
+fn freeze_same_platform(depfile_path: &str, lockfile_path: &str) -> Result<()> {
+    let depfile = File::open(depfile_path)?;
+    let env_hash = compute_file_hash(depfile)?;
+
+    // Extract the name of the environment
+    let depfile2 = File::open(depfile_path)?;
+    let env_spec = read_conda_yaml_data(depfile2)?;
+    let env_name = env_spec["name"].as_str().unwrap();
+
+    let conda_path = find_conda()?;
+    // Create the environment, but use a name that is unlikely to clobber anything pre-existing.
+    let tmp_name = "___conda_lockfile_temp".to_string();
+    Command::new(&conda_path)
+        .args(&["env", "crate", "-f", &depfile_path, "-n", &tmp_name, "--force"])
+        .output()?;
+
+    // Read the env create by `conda create`.
+    let output = Command::new(&conda_path)
+        .args(&["env", "export", "-n", &tmp_name])
+        .output()?;
+    let lock_data = str::from_utf8(&output.stdout)?;
+    println!("{}", lock_data);
+
+    // Replace the temporary env name with the real one.
+    // Also drop the prefix field.  It is irrelevant.
+    let mut docs = YamlLoader::load_from_str(lock_data)?;
+    let doc = docs.remove(0);
+    let mut data_hash = doc.into_hash().unwrap();
+    data_hash.insert(Yaml::from_str("name"), Yaml::from_str(&env_name));
+    data_hash.remove(&Yaml::from_str("prefix"));
+    let lock_spec = Yaml::Hash(data_hash);
+
+    let lockfile = File::create(lockfile_path)?;
+    write_lockfile(lockfile, &lock_spec, &env_hash)?;
     Ok(())
 }
 
+fn write_lockfile<W: Write>(mut lockfile: W, lock_spec: &Yaml, env_hash: &str) -> Result<()> {
+    let mut serialized_data = String::new();
+    {
+        let mut emitter = YamlEmitter::new(&mut serialized_data);
+        emitter.dump(&lock_spec)?;
+    }
 
+    let env_hash_line = format!("{} {}\n", SIGIL, env_hash);
+    lockfile.write_all(env_hash_line.as_bytes())?;
+    lockfile.write_all(serialized_data.as_bytes())?;
+    Ok(())
+}
 
+fn freeze_linux_on_mac(_depfile_path: &str, _lockfile_path: &str) -> Result<()> {
+    Ok(())
+}
 
-fn extract_lockfile(matches: &ArgMatches) -> String {
+fn extract_lockfile_path(matches: &ArgMatches) -> String {
     match matches.value_of("lockfile") {
         Some(path) => path.to_string(),
         None => default_lockfile(),
@@ -113,7 +191,7 @@ fn handle_create(matches: &ArgMatches) -> Result<()> {
         return Err(ioError::new(ioErrorKind::Other, "Unsupported os").into());
     }
 
-    let lockfile_path = extract_lockfile(&matches);
+    let lockfile_path = extract_lockfile_path(&matches);
     let lockfile = File::open(&lockfile_path)?;
     let doc = read_conda_yaml_data(lockfile)?;
     let env_name = doc["name"].as_str().unwrap();
