@@ -1,23 +1,23 @@
 extern crate clap;
 extern crate glob;
 extern crate sha1;
-extern crate yaml_rust;
 extern crate tempfile;
+extern crate yaml_rust;
 
 use std::collections::HashSet;
 use std::env;
 use std::error::Error;
 use std::fs::{copy, File};
 use std::io::prelude::*;
-use std::io::{Error as ioError, ErrorKind as ioErrorKind, BufWriter};
+use std::io::{BufWriter, Error as ioError, ErrorKind as ioErrorKind};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::str;
 
 use clap::{App, Arg, ArgMatches, SubCommand};
 use glob::glob;
-use yaml_rust::{Yaml, YamlEmitter, YamlLoader};
 use tempfile::tempdir;
+use yaml_rust::{Yaml, YamlEmitter, YamlLoader};
 
 const SIGIL: &str = "# ENVHASH:";
 
@@ -61,8 +61,7 @@ fn interpolate_dockerfile() -> String {
     let one_line_command: Vec<&str> = BUILD_LOCKFILE
         .lines()
         .filter(|line| !line.starts_with("#"))
-        .collect()
-    ;
+        .collect();
     let olc = one_line_command.join(";");
     DOCKERFILE.replace("ONE_LINE_COMMAND", &olc)
 }
@@ -190,7 +189,7 @@ fn write_lockfile<W: Write>(mut lockfile: W, lock_spec: &Yaml, env_hash: &str) -
     Ok(())
 }
 
-fn read_env_name_and_hash(depfile_path: &str) -> Result<(String, String)>{
+fn read_env_name_and_hash(depfile_path: &str) -> Result<(String, String)> {
     let depfile = File::open(&depfile_path)?;
     let env_hash = compute_file_hash(depfile)?;
 
@@ -222,7 +221,6 @@ fn freeze_linux_on_mac(depfile_path: &str, lockfile_path: &str) -> Result<()> {
         depsfile.read_to_string(&mut depsfile_data)?;
     }
 
-
     // run container
     run_container(&tmpdir_path, &img_name)?;
 
@@ -230,7 +228,7 @@ fn freeze_linux_on_mac(depfile_path: &str, lockfile_path: &str) -> Result<()> {
     let mut tmp_lockfile = File::open(tmpdir_path.join("deps.yml.lock"))?;
     let mut tmp_lockfile_data = String::new();
     tmp_lockfile.read_to_string(&mut tmp_lockfile_data)?;
-    
+
     // Validation
     if !lockfile_is_valid(&depsfile_data, &tmp_lockfile_data) {
         return Err(ioError::new(ioErrorKind::Other, "Invalid lockfile").into());
@@ -290,16 +288,16 @@ fn get_deps(doc: &Yaml) -> (HashSet<&str>, HashSet<&str>) {
         match d.as_str() {
             Some(conda_dep) => {
                 conda_deps.insert(conda_dep);
-                continue
-            },
-            None => {},
+                continue;
+            }
+            None => {}
         };
         match d.as_vec() {
             Some(pips) => {
                 pip_deps.extend(pips.iter().filter_map(|pip| pip.as_str()));
-                continue
+                continue;
             }
-            None => {},
+            None => {}
         };
     }
     let conda_deps = only_pkg_names(conda_deps);
@@ -310,7 +308,9 @@ fn get_deps(doc: &Yaml) -> (HashSet<&str>, HashSet<&str>) {
 
 // TODO: make this iterable
 fn only_pkg_names(deps: HashSet<&str>) -> HashSet<&str> {
-    deps.iter().filter_map(|dep| dep.split("=").nth(0)).collect()
+    deps.iter()
+        .filter_map(|dep| dep.split("=").nth(0))
+        .collect()
 }
 
 fn extract_lockfile_path(matches: &ArgMatches) -> String {
