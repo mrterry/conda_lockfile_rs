@@ -2,23 +2,69 @@ extern crate clap;
 extern crate glob;
 extern crate sha1;
 extern crate yaml_rust;
+extern crate tempfile;
 
 use std::env;
 use std::error::Error;
 use std::fs::{copy, File};
 use std::io::prelude::*;
-use std::io::{Error as ioError, ErrorKind as ioErrorKind};
-use std::path::PathBuf;
-use std::process::Command;
+use std::io::{Error as ioError, ErrorKind as ioErrorKind, BufWriter};
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::str;
 
 use clap::{App, Arg, ArgMatches, SubCommand};
 use glob::glob;
 use yaml_rust::{Yaml, YamlEmitter, YamlLoader};
+use tempfile::tempdir;
 
 const SIGIL: &str = "# ENVHASH:";
 
 type Result<T> = std::result::Result<T, Box<Error>>;
+
+const DOCKERFILE: &str = "
+FROM debian:stretch
+
+RUN mkdir /app
+WORKDIR /app
+ENV CONDA_ROOT /var/lib/conda
+
+RUN apt-get update && \
+    apt-get install --yes bzip2 curl libc6 libc6-dev libc-dev gcc net-tools && \
+    apt-get autoclean
+
+RUN curl https://repo.continuum.io/miniconda/Miniconda3-4.5.11-Linux-x86_64.sh > miniconda.sh
+RUN bash miniconda.sh -b -f -p $CONDA_ROOT
+RUN echo 'ONE_LINE_COMMAND' > build_lockfile.sh
+
+ENTRYPOINT [\"/bin/bash\", \"./build_lockfile.sh\"]
+";
+
+const BUILD_LOCKFILE: &str = "set -e
+
+cd artifacts
+
+# We need the name of the environment for exporting the environment.
+# Unfortunately, `conda env create` doesn't return any information identifying
+# the name of the environment it created. As a workaround, provide an explicit
+# name to `conda env create` so there is no ambiguity when calling `conda env
+# export`.  This name *ought* be what is specified in `env.yml` itself.
+ENV_NAME=$(cat env_name)
+$CONDA_ROOT/bin/conda env create -f deps.yml -n $ENV_NAME
+# The prefix line includes an absolute path from inside this container.
+# Remove it to avoid confusion.
+$CONDA_ROOT/bin/conda env export -n $ENV_NAME | grep -v \"^prefix:\" > deps.yml.lock
+";
+
+fn interpolate_dockerfile() -> String {
+    let one_line_command: Vec<&str> = BUILD_LOCKFILE
+        .lines()
+        .filter(|line| !line.starts_with("#"))
+        .collect()
+    ;
+    let olc = one_line_command.join(";");
+    DOCKERFILE.replace("ONE_LINE_COMMAND", &olc)
+}
 
 fn main() -> Result<()> {
     let app_m = App::new("conda-lockfile")
@@ -93,13 +139,7 @@ fn handle_freeze(matches: &ArgMatches) -> Result<()> {
 }
 
 fn freeze_same_platform(depfile_path: &str, lockfile_path: &str) -> Result<()> {
-    let depfile = File::open(depfile_path)?;
-    let env_hash = compute_file_hash(depfile)?;
-
-    // Extract the name of the environment
-    let depfile2 = File::open(depfile_path)?;
-    let env_spec = read_conda_yaml_data(depfile2)?;
-    let env_name = env_spec["name"].as_str().unwrap();
+    let (env_name, env_hash) = read_env_name_and_hash(&depfile_path)?;
 
     let conda_path = find_conda()?;
     // Create the environment, but use a name that is unlikely to clobber anything pre-existing.
@@ -149,8 +189,79 @@ fn write_lockfile<W: Write>(mut lockfile: W, lock_spec: &Yaml, env_hash: &str) -
     Ok(())
 }
 
-fn freeze_linux_on_mac(_depfile_path: &str, _lockfile_path: &str) -> Result<()> {
+fn read_env_name_and_hash(depfile_path: &str) -> Result<(String, String)>{
+    let depfile = File::open(&depfile_path)?;
+    let env_hash = compute_file_hash(depfile)?;
+
+    let depfile2 = File::open(depfile_path)?;
+    let env_spec = read_conda_yaml_data(depfile2)?;
+    let env_name = env_spec["name"].as_str().unwrap();
+    Ok((env_name.to_string(), env_hash))
+}
+
+fn freeze_linux_on_mac(depfile_path: &str, lockfile_path: &str) -> Result<()> {
+    let (env_name, env_hash) = read_env_name_and_hash(&depfile_path)?;
+
+    // The only way to know what should be in an environment is to build it and document what
+    // dependencies showed up.  We do this in a docker container to ensure isolation, and to allow
+    // us to build lockfiles on mac.
+    let img_name = build_container();
+    let tmpdir = tempdir()?;
+    let tmpdir_path = tmpdir.path();
+
+    // put depfile into tmpdir
+    copy(depfile_path, tmpdir_path.join("deps.yml"))?;
+    let mut envname_file = File::create(tmpdir_path.join("env_name"))?;
+    envname_file.write_all(env_name.as_bytes())?;
+
+    // run container
+    run_container(&tmpdir_path, &img_name)?;
+
+    // Read the generated lockfile.
+    let mut tmp_lockfile = File::open(tmpdir_path.join("deps.yml.lock"))?;
+    let mut tmp_lockfile_data = String::new();
+    tmp_lockfile.read_to_string(&mut tmp_lockfile_data)?;
+    
+    // Validation
+    if !lockfile_is_valid() {
+        return Err(ioError::new(ioErrorKind::Other, "Invalid lockfile").into());
+    }
+
+    // Write valid lockfile & include hash
+    {
+        let mut lockfile = File::create(lockfile_path)?;
+        let env_hash_line = format!("{} {}\n", SIGIL, env_hash);
+        lockfile.write_all(env_hash_line.as_bytes())?;
+        lockfile.write_all(tmp_lockfile_data.as_bytes())?;
+    }
     Ok(())
+}
+
+fn build_container() -> String {
+    let image_name = "lock_file_maker".to_string();
+    let dockerfile = interpolate_dockerfile();
+    let docker_build = Command::new("docker")
+        .args(&["build", "-t", &image_name, "-"])
+        .stdin(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let mut docker_stdin = docker_build.stdin.unwrap();
+    let mut writer = BufWriter::new(&mut docker_stdin);
+    writer.write_all(dockerfile.as_bytes()).unwrap();
+    image_name
+}
+
+fn run_container(dir: &Path, img_name: &str) -> Result<()> {
+    let vol_mount = format!("{}:/app/artifacts", dir.to_str().unwrap());
+    Command::new("docker")
+        .args(&["run", "-v", &vol_mount, "-t", img_name])
+        .output()?;
+    Ok(())
+}
+
+fn lockfile_is_valid() -> bool{
+    true
 }
 
 fn extract_lockfile_path(matches: &ArgMatches) -> String {
