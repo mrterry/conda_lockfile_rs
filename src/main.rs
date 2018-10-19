@@ -4,6 +4,7 @@ extern crate sha1;
 extern crate yaml_rust;
 extern crate tempfile;
 
+use std::collections::HashSet;
 use std::env;
 use std::error::Error;
 use std::fs::{copy, File};
@@ -210,9 +211,17 @@ fn freeze_linux_on_mac(depfile_path: &str, lockfile_path: &str) -> Result<()> {
     let tmpdir_path = tmpdir.path();
 
     // put depfile into tmpdir
-    copy(depfile_path, tmpdir_path.join("deps.yml"))?;
-    let mut envname_file = File::create(tmpdir_path.join("env_name"))?;
-    envname_file.write_all(env_name.as_bytes())?;
+    {
+        copy(depfile_path, tmpdir_path.join("deps.yml"))?;
+        let mut envname_file = File::create(tmpdir_path.join("env_name"))?;
+        envname_file.write_all(env_name.as_bytes())?;
+    }
+    let mut depsfile_data = String::new();
+    {
+        let mut depsfile = File::open(tmpdir_path.join("deps.yml.lock"))?;
+        depsfile.read_to_string(&mut depsfile_data)?;
+    }
+
 
     // run container
     run_container(&tmpdir_path, &img_name)?;
@@ -223,7 +232,7 @@ fn freeze_linux_on_mac(depfile_path: &str, lockfile_path: &str) -> Result<()> {
     tmp_lockfile.read_to_string(&mut tmp_lockfile_data)?;
     
     // Validation
-    if !lockfile_is_valid() {
+    if !lockfile_is_valid(&depsfile_data, &tmp_lockfile_data) {
         return Err(ioError::new(ioErrorKind::Other, "Invalid lockfile").into());
     }
 
@@ -260,8 +269,48 @@ fn run_container(dir: &Path, img_name: &str) -> Result<()> {
     Ok(())
 }
 
-fn lockfile_is_valid() -> bool{
-    true
+fn lockfile_is_valid(depsfile_data: &str, lockfile_data: &str) -> bool {
+    let deps_docs = YamlLoader::load_from_str(depsfile_data).unwrap();
+    let deps_yaml = &deps_docs[0];
+    let (requested_conda, requested_pip) = get_deps(&deps_yaml);
+
+    let lock_docs = YamlLoader::load_from_str(lockfile_data).unwrap();
+    let lock_yaml = &lock_docs[0];
+    let (found_conda, found_pip) = get_deps(&lock_yaml);
+
+    // Should probaby do some error reporting if this fails.
+    found_conda.is_superset(&requested_conda) && found_pip.is_superset(&requested_pip)
+}
+
+fn get_deps(doc: &Yaml) -> (HashSet<&str>, HashSet<&str>) {
+    let mut pip_deps = HashSet::new();
+    let mut conda_deps = HashSet::new();
+    let deps = doc["dependencies"].as_vec().unwrap();
+    for d in deps.iter() {
+        match d.as_str() {
+            Some(conda_dep) => {
+                conda_deps.insert(conda_dep);
+                continue
+            },
+            None => {},
+        };
+        match d.as_vec() {
+            Some(pips) => {
+                pip_deps.extend(pips.iter().filter_map(|pip| pip.as_str()));
+                continue
+            }
+            None => {},
+        };
+    }
+    let conda_deps = only_pkg_names(conda_deps);
+    let pip_deps = only_pkg_names(pip_deps);
+
+    (conda_deps, pip_deps)
+}
+
+// TODO: make this iterable
+fn only_pkg_names(deps: HashSet<&str>) -> HashSet<&str> {
+    deps.iter().filter_map(|dep| dep.split("=").nth(0)).collect()
 }
 
 fn extract_lockfile_path(matches: &ArgMatches) -> String {
