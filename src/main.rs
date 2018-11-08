@@ -66,30 +66,118 @@ fn interpolate_dockerfile() -> String {
     DOCKERFILE.replace("ONE_LINE_COMMAND", &olc)
 }
 
-fn main() -> Result<()> {
-    let app_m = App::new("conda-lockfile")
+fn get_app(default_platform: &str) -> App {
+    App::new("conda-lockfile")
         .arg(
             Arg::with_name("v")
                 .short("v")
                 .multiple(true)
+                .global(true)
                 .help("Sets the level of verbosity"),
         ).subcommand(
             SubCommand::with_name("freeze")
-                .arg(Arg::with_name("depfile").default_value("deps.yml"))
-                .arg(Arg::with_name("lockfile").default_value("deps.yml"))
-                .arg(Arg::with_name("platform")),
+                .arg(
+                    Arg::with_name("depfile")
+                        .long("depfile")
+                        .default_value("deps.yml"),
+                ).arg(
+                    Arg::with_name("lockfile")
+                        .long("lockfile")
+                        .default_value("deps.yml"),
+                ).arg(
+                    Arg::with_name("platform")
+                        .long("platform")
+                        .default_value(default_platform),
+                ),
         ).subcommand(
             SubCommand::with_name("create")
-                .arg(Arg::with_name("lockfile").default_value("deps.yml"))
-                .arg(Arg::with_name("platform")),
+                .arg(
+                    Arg::with_name("lockfile")
+                        .long("lockfile")
+                        .default_value("deps.yml"),
+                ).arg(
+                    Arg::with_name("platform")
+                        .long("platform")
+                        .default_value(default_platform),
+                ),
         ).subcommand(
-            SubCommand::with_name("checkenv")
-                .arg(Arg::with_name("depfile").default_value("deps.yml")),
+            SubCommand::with_name("checkenv").arg(
+                Arg::with_name("depfile")
+                    .long("depfile")
+                    .default_value("deps.yml"),
+            ),
         ).subcommand(
             SubCommand::with_name("checklocks")
-                .arg(Arg::with_name("depfile").default_value("deps.yml"))
-                .arg(Arg::with_name("depfiles").multiple(true)),
-        ).get_matches();
+                .arg(
+                    Arg::with_name("depfile")
+                        .long("depfile")
+                        .default_value("deps.yml"),
+                ).arg(Arg::with_name("lockfiles").multiple(true)),
+        )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn freeze_defaults() {
+        let execution_platform = "Testing-Platform";
+        let app = get_app(&execution_platform);
+        let matches = app.get_matches_from(["conda-lockfile", "freeze"].iter());
+        let (name, sub_matches) = matches.subcommand();
+        let sub_matches = sub_matches.unwrap();
+        assert_eq!(name, "freeze");
+        assert_eq!(sub_matches.value_of("depfile").unwrap(), "deps.yml");
+        assert_eq!(sub_matches.value_of("lockfile").unwrap(), "deps.yml");
+        assert_eq!(
+            sub_matches.value_of("platform").unwrap(),
+            execution_platform
+        );
+    }
+
+    #[test]
+    fn freeze_options() {
+        let execution_platform = "Testing-Platform";
+        let app = get_app(&execution_platform);
+        let matches = app.get_matches_from(
+            [
+                "conda-lockfile",
+                "freeze",
+                "--depfile",
+                "custom_depfile",
+                "--lockfile",
+                "custom_lockfile",
+                "--platform",
+                "custom_platform",
+            ]
+                .iter(),
+        );
+        let (name, sub_matches) = matches.subcommand();
+        let sub_matches = sub_matches.unwrap();
+        assert_eq!(name, "freeze");
+        assert_eq!(sub_matches.value_of("depfile").unwrap(), "custom_depfile");
+        assert_eq!(sub_matches.value_of("lockfile").unwrap(), "custom_lockfile");
+        assert_eq!(sub_matches.value_of("platform").unwrap(), "custom_platform");
+    }
+
+    #[test]
+    fn checklogs_files() {
+        let execution_platform = "Testing-Platform";
+        let app = get_app(&execution_platform);
+        let matches = app.get_matches_from(["conda-lockfile", "checklocks", "foo", "bar"].iter());
+        let (name, sub_matches) = matches.subcommand();
+        let sub_matches = sub_matches.unwrap();
+        assert_eq!(name, "checklocks");
+        assert_eq!(sub_matches.value_of("depfile").unwrap(), "deps.yml");
+        let dep_files: Vec<&str> = sub_matches.values_of("lockfiles").unwrap().collect();
+        assert_eq!(dep_files, ["foo", "bar"]);
+    }
+}
+
+fn main() -> Result<()> {
+    let execution_platform = get_platform()?;
+    let app_m = get_app(&execution_platform).get_matches();
 
     match app_m.occurrences_of("v") {
         0 => println!("Only output on errors"),
@@ -112,10 +200,7 @@ fn handle_freeze(matches: &ArgMatches) -> Result<()> {
     let depfile_path = matches.value_of("depfile").unwrap();
 
     let execution_platform = get_platform()?;
-    let target_platform = match matches.value_of("platform") {
-        Some(platform) => platform,
-        None => &execution_platform,
-    };
+    let target_platform = matches.value_of("platform").unwrap();
 
     // TODO: this might not be the correct path when cross-building.
     if execution_platform == target_platform {
