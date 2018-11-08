@@ -1,5 +1,5 @@
 [package]
-name = "conda_lockfile_rs"
+name = "conda-lockfile"
 version = "0.1.0"
 authors = ["Matt Terry <mrterry@nextdoor.com>"]
 
