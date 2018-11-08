@@ -3,6 +3,8 @@ extern crate glob;
 extern crate sha1;
 extern crate tempfile;
 extern crate yaml_rust;
+#[macro_use] extern crate log;
+extern crate simplelog;
 
 use std::collections::HashSet;
 use std::env;
@@ -18,6 +20,7 @@ use clap::{App, Arg, ArgMatches, SubCommand};
 use glob::glob;
 use tempfile::tempdir;
 use yaml_rust::{Yaml, YamlEmitter, YamlLoader};
+use simplelog::{TermLogger, Config, LogLevelFilter};
 
 const SIGIL: &str = "# ENVHASH:";
 
@@ -116,75 +119,17 @@ fn get_app(default_platform: &str) -> App {
         )
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn freeze_defaults() {
-        let execution_platform = "Testing-Platform";
-        let app = get_app(&execution_platform);
-        let matches = app.get_matches_from(["conda-lockfile", "freeze"].iter());
-        let (name, sub_matches) = matches.subcommand();
-        let sub_matches = sub_matches.unwrap();
-        assert_eq!(name, "freeze");
-        assert_eq!(sub_matches.value_of("depfile").unwrap(), "deps.yml");
-        assert_eq!(sub_matches.value_of("lockfile").unwrap(), "deps.yml");
-        assert_eq!(
-            sub_matches.value_of("platform").unwrap(),
-            execution_platform
-        );
-    }
-
-    #[test]
-    fn freeze_options() {
-        let execution_platform = "Testing-Platform";
-        let app = get_app(&execution_platform);
-        let matches = app.get_matches_from(
-            [
-                "conda-lockfile",
-                "freeze",
-                "--depfile",
-                "custom_depfile",
-                "--lockfile",
-                "custom_lockfile",
-                "--platform",
-                "custom_platform",
-            ]
-                .iter(),
-        );
-        let (name, sub_matches) = matches.subcommand();
-        let sub_matches = sub_matches.unwrap();
-        assert_eq!(name, "freeze");
-        assert_eq!(sub_matches.value_of("depfile").unwrap(), "custom_depfile");
-        assert_eq!(sub_matches.value_of("lockfile").unwrap(), "custom_lockfile");
-        assert_eq!(sub_matches.value_of("platform").unwrap(), "custom_platform");
-    }
-
-    #[test]
-    fn checklogs_files() {
-        let execution_platform = "Testing-Platform";
-        let app = get_app(&execution_platform);
-        let matches = app.get_matches_from(["conda-lockfile", "checklocks", "foo", "bar"].iter());
-        let (name, sub_matches) = matches.subcommand();
-        let sub_matches = sub_matches.unwrap();
-        assert_eq!(name, "checklocks");
-        assert_eq!(sub_matches.value_of("depfile").unwrap(), "deps.yml");
-        let dep_files: Vec<&str> = sub_matches.values_of("lockfiles").unwrap().collect();
-        assert_eq!(dep_files, ["foo", "bar"]);
-    }
-}
-
 fn main() -> Result<()> {
     let execution_platform = get_platform()?;
     let app_m = get_app(&execution_platform).get_matches();
 
-    match app_m.occurrences_of("v") {
-        0 => println!("Only output on errors"),
-        1 => println!("Info-level verbosity"),
-        2 => println!("Debug-level verbosity"),
-        3 | _ => println!("Don't be crazy"),
-    }
+    let log_level = match app_m.occurrences_of("v") {
+        0 => LogLevelFilter::Error,
+        1 => LogLevelFilter::Info,
+        2 => LogLevelFilter::Debug,
+        _ => LogLevelFilter::Debug,
+    };
+    TermLogger::new(log_level, Config::default()).unwrap();
 
     let val = match app_m.subcommand() {
         ("freeze", Some(sub_m)) => handle_freeze(sub_m),
@@ -245,7 +190,7 @@ fn freeze_same_platform(depfile_path: &str, lockfile_path: &str) -> Result<()> {
         .args(&["env", "export", "-n", &tmp_name])
         .output()?;
     let lock_data = str::from_utf8(&output.stdout)?;
-    println!("{}", lock_data);
+    debug!("{}", lock_data);
 
     // Replace the temporary env name with the real one.
     // Also drop the prefix field.  It is irrelevant.
@@ -449,7 +394,7 @@ fn handle_create(matches: &ArgMatches) -> Result<()> {
     let env_name = doc["name"].as_str().unwrap();
 
     let conda_path = find_conda()?;
-    println!("conda_path {}", conda_path);
+    info!("conda_path {}", conda_path);
     let output = Command::new(conda_path)
         .args(&[
             "env",
@@ -462,7 +407,7 @@ fn handle_create(matches: &ArgMatches) -> Result<()> {
             "-f",
             &lockfile_path,
         ]).output()?;
-    println!("{:?}", output);
+    debug!("{:?}", output);
 
     // Copy lockfile to constructed env
     let mut embeded_lockfile = conda_prefix(&env_name)?;
@@ -518,11 +463,11 @@ fn handle_checkenv(matches: &ArgMatches) -> Result<()> {
     let depfile2 = File::open(depfile_path)?;
     let doc = read_conda_yaml_data(depfile2)?;
     let env_name = doc["name"].as_str().unwrap();
-    println!("env name: {}", env_name);
+    info!("env name: {}", env_name);
 
     let root = env::var("CONDA_ROOT").unwrap();
     let lockfile_path: PathBuf = [&root, "envs", env_name, "deps.yml.lock"].iter().collect();
-    println!("lockfile_path: {}", lockfile_path.to_str().unwrap());
+    info!("lockfile_path: {}", lockfile_path.to_str().unwrap());
 
     let lockfile = File::open(lockfile_path)?;
     let found_hash = read_sigil_hash(lockfile)?;
@@ -530,9 +475,7 @@ fn handle_checkenv(matches: &ArgMatches) -> Result<()> {
     if found_hash == expected_hash {
         Ok(())
     } else {
-        println!("{}", expected_hash);
-        println!("{}", found_hash);
-        println!("{}", expected_hash == found_hash);
+        error!("Hashes do not match (expected, found): {} {}", expected_hash, found_hash);
         Err(ioError::new(ioErrorKind::Other, "Hashes do not match").into())
     }
 }
@@ -561,12 +504,12 @@ fn handle_checklocks(matches: &ArgMatches) -> Result<()> {
         let found_hash = read_sigil_hash(lockfile)?;
         if found_hash != expected_hash {
             success = false;
-            println!(
+            error!(
                 "Hashes do not match {:?}, {:?}",
                 depfile_path, lockfile_path
             );
-            println!("lock    hash: {}", found_hash);
-            println!("depfile hash: {}", expected_hash);
+            error!("lock    hash: {}", found_hash);
+            error!("depfile hash: {}", expected_hash);
         }
     }
 
@@ -574,5 +517,64 @@ fn handle_checklocks(matches: &ArgMatches) -> Result<()> {
         Ok(())
     } else {
         Err(ioError::new(ioErrorKind::Other, "Hashes do not match").into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn freeze_defaults() {
+        let execution_platform = "Testing-Platform";
+        let app = get_app(&execution_platform);
+        let matches = app.get_matches_from(["conda-lockfile", "freeze"].iter());
+        let (name, sub_matches) = matches.subcommand();
+        let sub_matches = sub_matches.unwrap();
+        assert_eq!(name, "freeze");
+        assert_eq!(sub_matches.value_of("depfile").unwrap(), "deps.yml");
+        assert_eq!(sub_matches.value_of("lockfile").unwrap(), "deps.yml");
+        assert_eq!(
+            sub_matches.value_of("platform").unwrap(),
+            execution_platform
+        );
+    }
+
+    #[test]
+    fn freeze_options() {
+        let execution_platform = "Testing-Platform";
+        let app = get_app(&execution_platform);
+        let matches = app.get_matches_from(
+            [
+                "conda-lockfile",
+                "freeze",
+                "--depfile",
+                "custom_depfile",
+                "--lockfile",
+                "custom_lockfile",
+                "--platform",
+                "custom_platform",
+            ]
+                .iter(),
+        );
+        let (name, sub_matches) = matches.subcommand();
+        let sub_matches = sub_matches.unwrap();
+        assert_eq!(name, "freeze");
+        assert_eq!(sub_matches.value_of("depfile").unwrap(), "custom_depfile");
+        assert_eq!(sub_matches.value_of("lockfile").unwrap(), "custom_lockfile");
+        assert_eq!(sub_matches.value_of("platform").unwrap(), "custom_platform");
+    }
+
+    #[test]
+    fn checklogs_files() {
+        let execution_platform = "Testing-Platform";
+        let app = get_app(&execution_platform);
+        let matches = app.get_matches_from(["conda-lockfile", "checklocks", "foo", "bar"].iter());
+        let (name, sub_matches) = matches.subcommand();
+        let sub_matches = sub_matches.unwrap();
+        assert_eq!(name, "checklocks");
+        assert_eq!(sub_matches.value_of("depfile").unwrap(), "deps.yml");
+        let dep_files: Vec<&str> = sub_matches.values_of("lockfiles").unwrap().collect();
+        assert_eq!(dep_files, ["foo", "bar"]);
     }
 }
