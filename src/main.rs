@@ -11,14 +11,14 @@ use std::env;
 use std::error::Error;
 use std::fs::{copy, File};
 use std::io::prelude::*;
-use std::io::{BufWriter, Error as ioError, ErrorKind as ioErrorKind};
+use std::io::{Error as ioError, ErrorKind as ioErrorKind};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::str;
 
 use clap::{App, Arg, ArgMatches, SubCommand};
 use glob::glob;
-use tempfile::tempdir;
+use tempfile::tempdir_in;
 use yaml_rust::{Yaml, YamlEmitter, YamlLoader};
 use simplelog::{TermLogger, Config, LogLevelFilter};
 
@@ -45,9 +45,7 @@ ENTRYPOINT [\"/bin/bash\", \"./build_lockfile.sh\"]
 ";
 
 const BUILD_LOCKFILE: &str = "set -e
-
 cd artifacts
-
 # We need the name of the environment for exporting the environment.
 # Unfortunately, `conda env create` doesn't return any information identifying
 # the name of the environment it created. As a workaround, provide an explicit
@@ -85,8 +83,7 @@ fn get_app(default_platform: &str) -> App {
                         .default_value("deps.yml"),
                 ).arg(
                     Arg::with_name("lockfile")
-                        .long("lockfile")
-                        .default_value("deps.yml"),
+                        .long("lockfile"),
                 ).arg(
                     Arg::with_name("platform")
                         .long("platform")
@@ -129,7 +126,8 @@ fn main() -> Result<()> {
         2 => LogLevelFilter::Debug,
         _ => LogLevelFilter::Debug,
     };
-    TermLogger::new(log_level, Config::default()).unwrap();
+    TermLogger::init(log_level, Config::default()).unwrap();
+    debug!("Setting log level to {}", log_level);
 
     let val = match app_m.subcommand() {
         ("freeze", Some(sub_m)) => handle_freeze(sub_m),
@@ -142,6 +140,7 @@ fn main() -> Result<()> {
 }
 
 fn handle_freeze(matches: &ArgMatches) -> Result<()> {
+    info!("Freezing");
     let depfile_path = matches.value_of("depfile").unwrap();
 
     let execution_platform = get_platform()?;
@@ -149,13 +148,17 @@ fn handle_freeze(matches: &ArgMatches) -> Result<()> {
 
     // TODO: this might not be the correct path when cross-building.
     if execution_platform == target_platform {
+        info!("Execution & target platform match");
         let lockfile_path = extract_lockfile_path(&matches);
         return freeze_same_platform(&depfile_path, &lockfile_path);
     }
 
     match (execution_platform.as_str(), target_platform) {
         ("Darwin", "Linux") => {
-            let lockfile_path = "TODO".to_string();
+            let lockfile_path = match matches.value_of("lockfile") {
+                Some(path) => path.to_string(),
+                None => format!("deps.yml.{}.lock", target_platform),
+            };
             freeze_linux_on_mac(&depfile_path, &lockfile_path)
         }
         _ => {
@@ -169,6 +172,7 @@ fn handle_freeze(matches: &ArgMatches) -> Result<()> {
 }
 
 fn freeze_same_platform(depfile_path: &str, lockfile_path: &str) -> Result<()> {
+    debug!("Freezing");
     let (env_name, env_hash) = read_env_name_and_hash(&depfile_path)?;
 
     let conda_path = find_conda()?;
@@ -177,20 +181,22 @@ fn freeze_same_platform(depfile_path: &str, lockfile_path: &str) -> Result<()> {
     Command::new(&conda_path)
         .args(&[
             "env",
-            "crate",
+            "create",
             "-f",
             &depfile_path,
             "-n",
             &tmp_name,
             "--force",
         ]).output()?;
+    info!("Made new env new env");
 
     // Read the env create by `conda create`.
+    debug!("Reading env");
     let output = Command::new(&conda_path)
         .args(&["env", "export", "-n", &tmp_name])
         .output()?;
     let lock_data = str::from_utf8(&output.stdout)?;
-    debug!("{}", lock_data);
+    debug!("Env data:\n{}", lock_data);
 
     // Replace the temporary env name with the real one.
     // Also drop the prefix field.  It is irrelevant.
@@ -201,12 +207,14 @@ fn freeze_same_platform(depfile_path: &str, lockfile_path: &str) -> Result<()> {
     data_hash.remove(&Yaml::from_str("prefix"));
     let lock_spec = Yaml::Hash(data_hash);
 
+    info!("Writing to {}", lockfile_path);
     let lockfile = File::create(lockfile_path)?;
     write_lockfile(lockfile, &lock_spec, &env_hash)?;
     Ok(())
 }
 
 fn write_lockfile<W: Write>(mut lockfile: W, lock_spec: &Yaml, env_hash: &str) -> Result<()> {
+    info!("Writing lockfile");
     let mut serialized_data = String::new();
     {
         let mut emitter = YamlEmitter::new(&mut serialized_data);
@@ -216,6 +224,7 @@ fn write_lockfile<W: Write>(mut lockfile: W, lock_spec: &Yaml, env_hash: &str) -
     let env_hash_line = format!("{} {}\n", SIGIL, env_hash);
     lockfile.write_all(env_hash_line.as_bytes())?;
     lockfile.write_all(serialized_data.as_bytes())?;
+    info!("Successfully wrote");
     Ok(())
 }
 
@@ -230,29 +239,38 @@ fn read_env_name_and_hash(depfile_path: &str) -> Result<(String, String)> {
 }
 
 fn freeze_linux_on_mac(depfile_path: &str, lockfile_path: &str) -> Result<()> {
+    info!("Freezing Linux on mac");
     let (env_name, env_hash) = read_env_name_and_hash(&depfile_path)?;
 
     // The only way to know what should be in an environment is to build it and document what
     // dependencies showed up.  We do this in a docker container to ensure isolation, and to allow
     // us to build lockfiles on mac.
     let img_name = build_container();
-    let tmpdir = tempdir()?;
+    info!("Make container {}", img_name);
+    let tmpdir = tempdir_in("/tmp/")?;
     let tmpdir_path = tmpdir.path();
 
     // put depfile into tmpdir
     {
-        copy(depfile_path, tmpdir_path.join("deps.yml"))?;
+        info!("Copying depsfile");
+        let dest = tmpdir_path.join("deps.yml");
+        copy(depfile_path, dest)?;
         let mut envname_file = File::create(tmpdir_path.join("env_name"))?;
         envname_file.write_all(env_name.as_bytes())?;
     }
-    let mut depsfile_data = String::new();
-    {
-        let mut depsfile = File::open(tmpdir_path.join("deps.yml.lock"))?;
-        depsfile.read_to_string(&mut depsfile_data)?;
-    }
 
     // run container
+    info!("Running container");
     run_container(&tmpdir_path, &img_name)?;
+    info!("Container completed");
+
+    let mut depsfile_data = String::new();
+    {
+        debug!("reading lockfile");
+        let dest = tmpdir_path.join("deps.yml.lock");
+        let mut depsfile = File::open(dest)?;
+        depsfile.read_to_string(&mut depsfile_data)?;
+    }
 
     // Read the generated lockfile.
     let mut tmp_lockfile = File::open(tmpdir_path.join("deps.yml.lock"))?;
@@ -265,6 +283,7 @@ fn freeze_linux_on_mac(depfile_path: &str, lockfile_path: &str) -> Result<()> {
     }
 
     // Write valid lockfile & include hash
+    info!("Writing lockfile {}", lockfile_path);
     {
         let mut lockfile = File::create(lockfile_path)?;
         let env_hash_line = format!("{} {}\n", SIGIL, env_hash);
@@ -275,25 +294,27 @@ fn freeze_linux_on_mac(depfile_path: &str, lockfile_path: &str) -> Result<()> {
 }
 
 fn build_container() -> String {
+    info!("Building container");
     let image_name = "lock_file_maker".to_string();
     let dockerfile = interpolate_dockerfile();
-    let docker_build = Command::new("docker")
+    let mut docker_build = Command::new("docker")
         .args(&["build", "-t", &image_name, "-"])
         .stdin(Stdio::piped())
         .spawn()
         .unwrap();
 
-    let mut docker_stdin = docker_build.stdin.unwrap();
-    let mut writer = BufWriter::new(&mut docker_stdin);
-    writer.write_all(dockerfile.as_bytes()).unwrap();
+    let _ = docker_build.stdin.take().unwrap().write_all(dockerfile.as_bytes());
+    docker_build.wait().unwrap();
     image_name
 }
 
 fn run_container(dir: &Path, img_name: &str) -> Result<()> {
     let vol_mount = format!("{}:/app/artifacts", dir.to_str().unwrap());
-    Command::new("docker")
+    let output = Command::new("docker")
         .args(&["run", "-v", &vol_mount, "-t", img_name])
         .output()?;
+    let msg = std::str::from_utf8(&(output.stdout))?;
+    debug!("{}", msg);
     Ok(())
 }
 
