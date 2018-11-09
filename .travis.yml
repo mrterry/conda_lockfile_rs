@@ -1,14 +1,6 @@
-# Based on the "trust" template v0.1.2
-# https://github.com/japaric/trust/tree/v0.1.2
-
 dist: trusty
 language: rust
-services: docker
 sudo: required
-
-env:
-  global:
-    - CRATE_NAME=conda_lockfile_rs
 
 matrix:
   include:
@@ -21,9 +13,6 @@ install:
 
 script:
   - bash ci/script.sh
-
-before_deploy:
-  - sh ci/before_deploy.sh
 
 deploy:
   on:
