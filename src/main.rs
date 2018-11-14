@@ -3,7 +3,8 @@ extern crate glob;
 extern crate sha1;
 extern crate tempfile;
 extern crate yaml_rust;
-#[macro_use] extern crate log;
+#[macro_use]
+extern crate log;
 extern crate simplelog;
 
 use std::collections::HashSet;
@@ -18,9 +19,9 @@ use std::str;
 
 use clap::{App, Arg, ArgMatches, SubCommand};
 use glob::glob;
+use simplelog::{Config, LogLevelFilter, TermLogger};
 use tempfile::tempdir_in;
 use yaml_rust::{Yaml, YamlEmitter, YamlLoader};
-use simplelog::{TermLogger, Config, LogLevelFilter};
 
 const SIGIL: &str = "# ENVHASH:";
 
@@ -81,10 +82,8 @@ fn get_app(default_platform: &str) -> App {
                     Arg::with_name("depfile")
                         .long("depfile")
                         .default_value("deps.yml"),
-                ).arg(
-                    Arg::with_name("lockfile")
-                        .long("lockfile"),
-                ).arg(
+                ).arg(Arg::with_name("lockfile").long("lockfile"))
+                .arg(
                     Arg::with_name("platform")
                         .long("platform")
                         .default_value(default_platform),
@@ -303,7 +302,11 @@ fn build_container() -> String {
         .spawn()
         .unwrap();
 
-    let _ = docker_build.stdin.take().unwrap().write_all(dockerfile.as_bytes());
+    let _ = docker_build
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(dockerfile.as_bytes());
     docker_build.wait().unwrap();
     image_name
 }
@@ -496,7 +499,10 @@ fn handle_checkenv(matches: &ArgMatches) -> Result<()> {
     if found_hash == expected_hash {
         Ok(())
     } else {
-        error!("Hashes do not match (expected, found): {} {}", expected_hash, found_hash);
+        error!(
+            "Hashes do not match (expected, found): {} {}",
+            expected_hash, found_hash
+        );
         Err(ioError::new(ioErrorKind::Other, "Hashes do not match").into())
     }
 }
